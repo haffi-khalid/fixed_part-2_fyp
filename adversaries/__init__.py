@@ -1,0 +1,1 @@
+from adversaries.adversaries_cnn import fgsm_attack, bim_attack

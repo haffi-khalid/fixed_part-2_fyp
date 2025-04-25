@@ -37,6 +37,17 @@ import numpy as np
 import pennylane as qml
 from pennylane import numpy as pnp
 
+
+# ── extras for plots & metrics ─────────────────────────────────────────
+from pathlib import Path
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import (confusion_matrix, precision_recall_fscore_support,
+                             roc_auc_score, roc_curve)
+# ───────────────────────────────────────────────────────────────────────
+
+
 # Import the quantum classifier and adversarial attack functions.
 from models.quantum_model_angle import quantum_classifier, n_qubits, p as num_layers  # p is the number of layers in the model.
 from adversaries.adversaries_angle import fgsm_attack, bim_attack
@@ -65,13 +76,11 @@ val_data_path = r"C:\Users\ASDF\Desktop\part-2_fyp\data\angle\banknote_angle_pre
 test_data_path = r"C:\Users\ASDF\Desktop\part-2_fyp\data\angle\banknote_angle_preprocessed_test.csv"
 
 # Output folders for metrics
-if training_type == "clean":
-    metrics_folder = r"C:\Users\ASDF\Desktop\part-2_fyp\Gen_data\angle\clean"
-else:
-    metrics_folder = r"C:\Users\ASDF\Desktop\part-2_fyp\Gen_data\angle\adversarial"
+# Metrics folder (requirement ①)
+embedding   = "angle"
+metrics_dir = fr"C:\Users\ASDF\Desktop\part-2_fyp\Gen_data\{embedding}\{training_type.lower()}"
+os.makedirs(metrics_dir, exist_ok=True)
 
-if not os.path.exists(metrics_folder):
-    os.makedirs(metrics_folder)
 
 # Weights save folder
 weights_folder = r"C:\Users\ASDF\Desktop\part-2_fyp\weights\angle"
@@ -85,6 +94,70 @@ if not os.path.exists(weights_folder):
 df_train = pd.read_csv(train_data_path)
 df_val = pd.read_csv(val_data_path)
 df_test = pd.read_csv(test_data_path)
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ─────────────────── helpers for plots ────────────────────────────────
+def z_to_prob(z):          # ⟨Z⟩→[0,1]
+    return (z + 1.0) / 2.0
+
+def save_eval_plots(y_true, y_pred, losses, folder: str, tag="clean"):
+    """Confusion-matrix, PR/F1, Δ-loss and ROC"""
+    p = Path(folder); p.mkdir(parents=True, exist_ok=True)
+
+    # 1 Confusion matrix ------------------------------------------------
+    cm = confusion_matrix(y_true, y_pred, labels=[1, -1])
+    plt.figure(figsize=(3,3))
+    sns.heatmap(cm, annot=True, cmap="Blues", fmt="d",
+                xticklabels=["+1","-1"], yticklabels=["+1","-1"])
+    plt.xlabel("Pred"); plt.ylabel("True"); plt.title(f"CM ({tag})")
+    plt.savefig(p/f"{tag}_confusion_matrix.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # 2 Precision / Recall / F1 table -----------------------------------
+    pr, rc, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, labels=[1,-1], zero_division=0, average=None)
+    fig, ax = plt.subplots(figsize=(4,1.4)); ax.axis("off")
+    cell = [[f"{x:.2f}" for x in row] for row in zip(pr, rc, f1)]
+    tbl = ax.table(cellText=cell, rowLabels=["+1","-1"],
+                   colLabels=["Prec","Rec","F1"], loc="center")
+    tbl.auto_set_font_size(False); tbl.set_fontsize(8)
+    plt.title(f"PR/F1 ({tag})")
+    plt.savefig(p/f"{tag}_f1_table.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # 3 Δ-loss curve -----------------------------------------------------
+    if losses.get("train") and losses.get("val"):
+        dl = [tr-va for tr,va in zip(losses["train"], losses["val"])]
+        plt.figure(); plt.plot(dl); plt.title("Δ loss (train-val)")
+        plt.xlabel("epoch"); plt.ylabel("train-val")
+        plt.savefig(p/f"{tag}_delta_loss.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+    # 4 ROC / AUROC ------------------------------------------------------
+    try:
+        y_score = z_to_prob(y_pred)          # already probabilities
+        y_bin   = (np.array(y_true)+1)//2
+        auc     = roc_auc_score(y_bin, y_score)
+        fpr,tpr,_ = roc_curve(y_bin, y_score)
+        plt.figure(); plt.plot(fpr,tpr,label=f"AUC={auc:.3f}")
+        plt.plot([0,1],[0,1],'--k'); plt.xlabel("FPR"); plt.ylabel("TPR")
+        plt.legend(); plt.title(f"ROC ({tag})")
+        plt.savefig(p/f"{tag}_roc.png", dpi=300, bbox_inches="tight"); plt.close()
+    except ValueError:
+        pass
+# ───────────────────────────────────────────────────────────────────────
+
 
 # Extract features and labels.
 # The dataset columns are assumed to be: ["variance", "skewness", "curtosis", "entropy", "class"]
@@ -232,7 +305,7 @@ for epoch in range(1, num_epochs+1):
 # 7. SAVE METRICS TO CSV FILES
 # ------------------------------
 # Determine metrics save path based on training type.
-metrics_prefix = metrics_folder + os.sep
+metrics_prefix = metrics_dir + os.sep
 
 # Save metrics (as CSV files with one column, each row corresponding to an epoch).
 pd.DataFrame({"train_loss": train_loss_hist}).to_csv(metrics_prefix + "training_loss.csv", index=False)
@@ -245,6 +318,47 @@ pd.DataFrame({"test_acc": test_acc_hist}).to_csv(metrics_prefix + "test_accuracy
 if training_type in ["fgsm", "bim"]:
     pd.DataFrame({"adv_test_loss": adv_test_loss_hist}).to_csv(metrics_prefix + "adversarial_test_loss.csv", index=False)
     pd.DataFrame({"adv_test_acc": adv_test_acc_hist}).to_csv(metrics_prefix + "adversarial_test_accuracy.csv", index=False)
+
+
+
+
+# ------------- PLOTS on clean test ------------------------------------
+y_score_clean = np.array([ z_to_prob(quantum_classifier(weights, x))
+                           for x in X_test ])
+y_pred_clean  = np.where(y_score_clean >= 0.5, 1.0, -1.0)
+save_eval_plots(
+    y_true=y_test,
+    y_pred=y_pred_clean,
+    losses={"train": train_loss_hist, "val": val_loss_hist},
+    folder=metrics_dir,
+    tag="clean"
+)
+
+# ------------- PLOTS on adversarial test (if any) ----------------------
+if training_type in ("fgsm", "bim"):
+    X_adv = []
+    for xi, yi in zip(X_test, y_test):
+        xa = (fgsm_attack(weights, xi.copy(), yi, epsilon)
+              if training_type=="fgsm"
+              else bim_attack(weights, xi.copy(), yi,
+                                        epsilon, bim_iterations, bim_alpha))
+        X_adv.append(xa)
+    y_score_adv = np.array([ z_to_prob(quantum_classifier(weights, x))
+                             for x in X_adv ])
+    y_pred_adv = np.where(y_score_adv >= 0.5, 1.0, -1.0)
+    save_eval_plots(
+        y_true=y_test, y_pred=y_pred_adv,
+        losses={"train": train_loss_hist, "val": val_loss_hist},
+        folder=metrics_dir, tag="adv")
+
+
+
+
+
+
+
+
+
 
 # ------------------------------
 # 8. SAVE FINAL WEIGHTS
